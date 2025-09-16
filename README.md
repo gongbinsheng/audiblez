@@ -109,11 +109,22 @@ For more detaila about voice quality, check this document: [Kokoro-82M voices](h
 
 ## How to run on GPU
 
-By default, audiblez runs on CPU. If you pass the option `--cuda` it will try to use the Cuda device via Torch.
+By default, audiblez runs on CPU. You can use GPU acceleration with the following options:
+
+- **CUDA**: Use `--cuda` to run on NVIDIA GPUs via CUDA
+- **Apple Silicon**: Use `--apple` to run on Apple M1/M2/M3 chips via Metal Performance Shaders (MPS)
 
 Check out this example: [Audiblez running on a Google Colab Notebook with Cuda ](https://colab.research.google.com/drive/164PQLowogprWQpRjKk33e-8IORAvqXKI?usp=sharing]).
 
-We don't currently support Apple Silicon, as there is not yet a Kokoro implementation in MLX. As soon as it will be available, we will support it.
+### Apple Silicon Support (New in v0.4.10)
+
+Apple Silicon Macs (M1, M2, M3) can now take advantage of GPU acceleration using Metal Performance Shaders:
+
+```bash
+audiblez book.epub --apple
+```
+
+This provides significant performance improvements over CPU-only processing.
 
 ## Manually pick chapters to convert
 
@@ -139,6 +150,7 @@ options:
   -s SPEED, --speed SPEED
                         Set speed from 0.5 to 2.0
   -c, --cuda            Use GPU via Cuda in Torch if available
+  -a, --apple           Use GPU via Apple Silicon (MPS) in Torch if available
   -o FOLDER, --output FOLDER
                         Output folder for the audiobook and temporary files
 

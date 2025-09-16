@@ -3,6 +3,7 @@
 # A simple wxWidgets UI for audiblez
 
 import torch.cuda
+import torch.backends.mps
 import numpy as np
 import soundfile
 import threading
@@ -18,6 +19,7 @@ from tempfile import NamedTemporaryFile
 from pathlib import Path
 
 from audiblez.voices import voices, flags
+from audiblez.settings import get_settings
 
 EVENTS = {
     'CORE_STARTED': NewEvent(),
@@ -32,14 +34,30 @@ border = 5
 
 class MainWindow(wx.Frame):
     def __init__(self, parent, title):
+        # Load settings
+        self.settings = get_settings()
+
+        # Use saved window size or calculate default
+        saved_width, saved_height = self.settings.get_window_size()
         screen_width, screen_h = wx.GetDisplaySize()
-        self.window_width = int(screen_width * 0.6)
-        super().__init__(parent, title=title, size=(self.window_width, self.window_width * 3 // 4))
+
+        # Use saved size if reasonable, otherwise use default calculation
+        if saved_width < 400 or saved_width > screen_width:
+            saved_width = int(screen_width * 0.6)
+        if saved_height < 300 or saved_height > screen_h:
+            saved_height = saved_width * 3 // 4
+
+        self.window_width = saved_width
+        super().__init__(parent, title=title, size=(saved_width, saved_height))
+
         self.chapters_panel = None
         self.preview_threads = []
         self.selected_chapter = None
         self.selected_book = None
         self.synthesis_in_progress = False
+
+        # Bind close event to save settings
+        self.Bind(wx.EVT_CLOSE, self.on_close)
 
         self.Bind(EVENTS['CORE_STARTED'][1], self.on_core_started)
         self.Bind(EVENTS['CORE_CHAPTER_STARTED'][1], self.on_core_chapter_started)
@@ -271,21 +289,51 @@ class MainWindow(wx.Frame):
 
         engine_label = wx.StaticText(panel, label="Engine:")
         engine_radio_panel = wx.Panel(panel)
-        cpu_radio = wx.RadioButton(engine_radio_panel, label="CPU", style=wx.RB_GROUP)
-        cuda_radio = wx.RadioButton(engine_radio_panel, label="CUDA")
-        if torch.cuda.is_available():
-            cuda_radio.SetValue(True)
+        self.cpu_radio = wx.RadioButton(engine_radio_panel, label="CPU", style=wx.RB_GROUP)
+        self.cuda_radio = wx.RadioButton(engine_radio_panel, label="CUDA")
+        self.apple_radio = wx.RadioButton(engine_radio_panel, label="Apple Silicon")
+
+        # Check which engines are available and disable unavailable ones
+        available_engines = self.settings.get_available_engines()
+
+        # Disable unavailable engines and set tooltips
+        if not available_engines['cuda']:
+            self.cuda_radio.Enable(False)
+            self.cuda_radio.SetToolTip("CUDA is not available on this system")
         else:
-            cpu_radio.SetValue(True)
-            # cuda_radio.Disable()
+            self.cuda_radio.SetToolTip("Use NVIDIA GPU acceleration")
+
+        if not available_engines['apple']:
+            self.apple_radio.Enable(False)
+            self.apple_radio.SetToolTip("Apple Silicon (MPS) is not available on this system")
+        else:
+            self.apple_radio.SetToolTip("Use Apple Silicon GPU acceleration")
+
+        # CPU is always available
+        self.cpu_radio.SetToolTip("Use CPU for processing (always available)")
+
+        # Set engine based on saved settings (already validated by settings module)
+        saved_engine = self.settings.get_engine()
+        if saved_engine == 'apple':
+            self.apple_radio.SetValue(True)
+            torch.set_default_device('mps')
+        elif saved_engine == 'cuda':
+            self.cuda_radio.SetValue(True)
+            torch.set_default_device('cuda')
+        else:
+            self.cpu_radio.SetValue(True)
+            torch.set_default_device('cpu')
+
         sizer.Add(engine_label, pos=(0, 0), flag=wx.ALL, border=border)
         sizer.Add(engine_radio_panel, pos=(0, 1), flag=wx.ALL, border=border)
         engine_radio_panel_sizer = wx.BoxSizer(wx.HORIZONTAL)
         engine_radio_panel.SetSizer(engine_radio_panel_sizer)
-        engine_radio_panel_sizer.Add(cpu_radio, 0, wx.ALL, 5)
-        engine_radio_panel_sizer.Add(cuda_radio, 0, wx.ALL, 5)
-        cpu_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: torch.set_default_device('cpu'))
-        cuda_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: torch.set_default_device('cuda'))
+        engine_radio_panel_sizer.Add(self.cpu_radio, 0, wx.ALL, 5)
+        engine_radio_panel_sizer.Add(self.cuda_radio, 0, wx.ALL, 5)
+        engine_radio_panel_sizer.Add(self.apple_radio, 0, wx.ALL, 5)
+        self.cpu_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: self._on_engine_changed('cpu'))
+        self.cuda_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: self._on_engine_changed('cuda'))
+        self.apple_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: self._on_engine_changed('apple'))
 
         # Create a list of voices with flags
         flag_and_voice_list = []
@@ -294,24 +342,31 @@ class MainWindow(wx.Frame):
                 flag_and_voice_list.append(f'{flags[code]} {v}')
 
         voice_label = wx.StaticText(panel, label="Voice:")
-        default_voice = flag_and_voice_list[0]
+        # Use saved voice or default to first voice
+        saved_voice = self.settings.get_voice()
+        if saved_voice and saved_voice in flag_and_voice_list:
+            default_voice = saved_voice
+        else:
+            default_voice = flag_and_voice_list[0]
         self.selected_voice = default_voice
-        voice_dropdown = wx.ComboBox(panel, choices=flag_and_voice_list, value=default_voice)
-        voice_dropdown.Bind(wx.EVT_COMBOBOX, self.on_select_voice)
+        self.voice_dropdown = wx.ComboBox(panel, choices=flag_and_voice_list, value=default_voice)
+        self.voice_dropdown.Bind(wx.EVT_COMBOBOX, self.on_select_voice)
         sizer.Add(voice_label, pos=(1, 0), flag=wx.ALL, border=border)
-        sizer.Add(voice_dropdown, pos=(1, 1), flag=wx.ALL, border=border)
+        sizer.Add(self.voice_dropdown, pos=(1, 1), flag=wx.ALL, border=border)
 
         # Add dropdown for speed
         speed_label = wx.StaticText(panel, label="Speed:")
-        speed_text_input = wx.TextCtrl(panel, value="1.0")
-        self.selected_speed = '1.0'
-        speed_text_input.Bind(wx.EVT_TEXT, self.on_select_speed)
+        saved_speed = str(self.settings.get_speed())
+        self.speed_text_input = wx.TextCtrl(panel, value=saved_speed)
+        self.selected_speed = saved_speed
+        self.speed_text_input.Bind(wx.EVT_TEXT, self.on_select_speed)
         sizer.Add(speed_label, pos=(2, 0), flag=wx.ALL, border=border)
-        sizer.Add(speed_text_input, pos=(2, 1), flag=wx.ALL, border=border)
+        sizer.Add(self.speed_text_input, pos=(2, 1), flag=wx.ALL, border=border)
 
         # Add file dialog selector to select output folder
         output_folder_label = wx.StaticText(panel, label="Output Folder:")
-        self.output_folder_text_ctrl = wx.TextCtrl(panel, value=os.path.abspath('.'))
+        saved_output_folder = self.settings.get_output_folder()
+        self.output_folder_text_ctrl = wx.TextCtrl(panel, value=saved_output_folder)
         self.output_folder_text_ctrl.SetEditable(False)
         # self.output_folder_text_ctrl.SetMinSize((200, -1))
         output_folder_button = wx.Button(panel, label="📂 Select")
@@ -372,6 +427,53 @@ class MainWindow(wx.Frame):
         speed = float(event.GetString())
         print('Selected speed', speed)
         self.selected_speed = speed
+
+    def _on_engine_changed(self, engine):
+        """Handle engine radio button changes"""
+        if engine == 'cpu':
+            torch.set_default_device('cpu')
+        elif engine == 'cuda':
+            torch.set_default_device('cuda')
+        elif engine == 'apple':
+            torch.set_default_device('mps')
+
+    def _save_current_settings(self):
+        """Save current UI settings to the settings file"""
+        try:
+            # Save window size
+            size = self.GetSize()
+            self.settings.set_window_size(size.width, size.height)
+
+            # Save engine selection
+            if self.cpu_radio.GetValue():
+                self.settings.set_engine('cpu')
+            elif self.cuda_radio.GetValue():
+                self.settings.set_engine('cuda')
+            elif self.apple_radio.GetValue():
+                self.settings.set_engine('apple')
+
+            # Save voice selection
+            self.settings.set_voice(self.selected_voice)
+
+            # Save speed
+            self.settings.set_speed(float(self.selected_speed))
+
+            # Save output folder
+            self.settings.set_output_folder(self.output_folder_text_ctrl.GetValue())
+
+            # Write to file
+            self.settings.save_settings()
+
+        except Exception as e:
+            print(f"Warning: Failed to save settings: {e}")
+
+    def on_close(self, event):
+        """Handle window close event"""
+        # Save settings before closing
+        self._save_current_settings()
+
+        # Close the window
+        self.Destroy()
 
     def open_epub(self, file_path):
         # Cleanup previous layout

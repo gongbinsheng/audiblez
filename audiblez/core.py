@@ -8,6 +8,7 @@ import traceback
 from glob import glob
 
 import torch.cuda
+import torch.backends.mps
 import spacy
 import ebooklib
 import soundfile
@@ -107,7 +108,7 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
     stats = SimpleNamespace(
         total_chars=sum(map(len, texts)),
         processed_chars=0,
-        chars_per_sec=500 if torch.cuda.is_available() else 50)
+        chars_per_sec=500 if (torch.cuda.is_available() or torch.backends.mps.is_available()) else 50)
     print('Started at:', time.strftime('%H:%M:%S'))
     print(f'Total characters: {stats.total_chars:,}')
     print('Total words:', len(' '.join(texts).split()))
@@ -154,7 +155,7 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
             chapter_wav_files.remove(chapter_wav_path)
 
     if has_ffmpeg:
-        create_index_file(title, creator, chapter_wav_files, output_folder)
+        create_index_file(title, creator, selected_chapters, chapter_wav_files, output_folder)
         create_m4b(chapter_wav_files, filename, cover_image, output_folder)
         if post_event: post_event('CORE_FINISHED')
 
@@ -222,7 +223,7 @@ def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False
 
 
 def find_document_chapters_and_extract_texts(book):
-    """Returns every chapter that is an ITEM_DOCUMENT and enriches each chapter with extracted_text."""
+    """Returns every chapter that is an ITEM_DOCUMENT and enriches each chapter with extracted_text and extracted_title."""
     document_chapters = []
     for chapter in book.get_items():
         if chapter.get_type() != ebooklib.ITEM_DOCUMENT:
@@ -230,6 +231,21 @@ def find_document_chapters_and_extract_texts(book):
         xml = chapter.get_body_content()
         soup = BeautifulSoup(xml, features='lxml')
         chapter.extracted_text = ''
+        chapter.extracted_title = ''
+
+        # Priority 1: Extract chapter title from HTML <title> tag in head section
+        head = soup.find('head')
+        if head:
+            title_element = head.find('title')
+            if title_element and title_element.text:
+                chapter.extracted_title = title_element.text.strip()
+
+        # Priority 2: Use filename as fallback if no title found in head
+        if not chapter.extracted_title:
+            filename = chapter.get_name()
+            # Clean up filename to make a reasonable title
+            chapter.extracted_title = filename.replace('.xhtml', '').replace('.html', '').replace('_', ' ').replace('-', ' ')
+
         html_content_tags = ['title', 'p', 'h1', 'h2', 'h3', 'h4', 'li']
         for text in [c.text.strip() for c in soup.find_all(html_content_tags) if c.text]:
             if not text.endswith('.'):
@@ -297,8 +313,11 @@ def concat_wavs_with_ffmpeg(chapter_files, output_folder, filename):
     with open(wav_list_txt, 'w') as f:
         for wav_file in chapter_files:
             f.write(f"file '{wav_file}'\n")
-    concat_file_path = Path(output_folder) / filename.replace('.epub', '.tmp.mp4')
-    subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', wav_list_txt, '-c', 'copy', concat_file_path])
+    concat_file_path = Path(output_folder) / filename.replace('.epub', '.tmp.wav')
+    result = subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', wav_list_txt, '-c', 'copy', concat_file_path])
+    if result.returncode != 0:
+        print(f"Concatenation failed. WAV list preserved at: {wav_list_txt}")
+        raise RuntimeError(f"Failed to concatenate WAV files. FFmpeg returned code {result.returncode}")
     Path(wav_list_txt).unlink()
     return concat_file_path
 
@@ -340,10 +359,14 @@ def create_m4b(chapter_files, filename, cover_image, output_folder):
         f'{final_filename}'  # Output file
     ])
 
-    Path(concat_file_path).unlink()
     if proc.returncode == 0:
+        Path(concat_file_path).unlink()
         print(f'{final_filename} created. Enjoy your audiobook.')
         print('Feel free to delete the intermediary .wav chapter files, the .m4b is all you need.')
+    else:
+        print(f'Error creating M4B file. FFmpeg returned code {proc.returncode}')
+        print(f'Concatenated audio file preserved at: {concat_file_path}')
+        raise RuntimeError(f"Failed to create M4B file. FFmpeg returned code {proc.returncode}")
 
 
 def probe_duration(file_name):
@@ -352,16 +375,29 @@ def probe_duration(file_name):
     return float(proc.stdout.strip())
 
 
-def create_index_file(title, creator, chapter_mp3_files, output_folder):
+def create_index_file(title, creator, selected_chapters, chapter_wav_files, output_folder):
+    def sanitize_title(title):
+        """Sanitize chapter title for ffmpeg metadata format"""
+        if not title:
+            return ""
+        # Remove or replace problematic characters for metadata
+        sanitized = title.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+        # Limit length to avoid issues with very long titles
+        if len(sanitized) > 100:
+            sanitized = sanitized[:97] + "..."
+        return sanitized
+
     with open(Path(output_folder) / "chapters.txt", "w", encoding="utf-8") as f:
         f.write(f";FFMETADATA1\ntitle={title}\nartist={creator}\n\n")
         start = 0
-        i = 0
-        for c in chapter_mp3_files:
-            duration = probe_duration(c)
+        for i, (chapter, wav_file) in enumerate(zip(selected_chapters, chapter_wav_files)):
+            duration = probe_duration(wav_file)
             end = start + (int)(duration * 1000)
-            f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}\ntitle=Chapter {i}\n\n")
-            i += 1
+
+            # Use extracted title, with fallback to generic chapter number
+            chapter_title = sanitize_title(chapter.extracted_title) if hasattr(chapter, 'extracted_title') and chapter.extracted_title else f"Chapter {i}"
+
+            f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}\ntitle={chapter_title}\n\n")
             start = end
 
 
