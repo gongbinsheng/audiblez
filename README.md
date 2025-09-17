@@ -14,9 +14,16 @@
 
 ![Audiblez GUI on MacOSX](./imgs/mac.png)
 
-## What's New in v0.4.10
+## What's New in v0.4.11
 
 This enhanced version includes all the improvements from the original v0.4.10 plus additional enhancements:
+
+### New in v0.4.11 🚀
+- **Resizable Console Panel**: Drag to resize the console output area and your preferred height is remembered
+- **Enhanced Console Experience**: Improved output formatting with proper line breaks and cleaner messages
+- **Simplified Controls**: Streamlined "Start" button and new "Delete Temp Files" button for easy cleanup
+- **macOS Compatibility**: Fixed subprocess PATH issues for ffmpeg and espeak-ng on macOS systems
+- **Cleaner Output**: Suppressed non-critical warnings from external libraries for better user experience
 
 ### Core v0.4.10 Features
 - **Apple Silicon Support**: GPU acceleration for M1, M2, M3 Macs using Metal Performance Shaders (MPS)
@@ -155,7 +162,10 @@ audiblez-ui
 ### GUI Features
 
 - **Smart Engine Selection**: Engine options (CPU, CUDA, Apple Silicon) are automatically enabled/disabled based on your hardware
-- **Persistent Settings**: Your preferences (window size, engine, voice, speed, output folder) are automatically saved and restored
+- **Persistent Settings**: Your preferences (window size, console height, engine, voice, speed, output folder) are automatically saved and restored
+- **Resizable Console Panel**: Drag the horizontal divider to adjust console height; your preference is remembered across sessions
+- **Enhanced Console Output**: Clean, properly formatted output with real-time audiobook generation progress
+- **Streamlined Controls**: Simplified "Start" button and convenient "Delete Temp Files" button for post-generation cleanup
 - **Real-time Tooltips**: Hover over disabled engines to see why they're unavailable
 - **Intelligent Fallback**: If your saved engine isn't available, the best alternative is automatically selected
 - **Progress Tracking**: Visual progress indicators for each conversion step
