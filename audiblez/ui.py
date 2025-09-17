@@ -239,11 +239,15 @@ class MainWindow(wx.Frame):
         # Add console panel at the bottom
         self.create_console_panel()
 
+        # Force layout update
+        self.main_sizer.Layout()
+        self.Layout()
+
     def create_console_panel(self):
         """Create the console output panel at the bottom of the window"""
-        # Create console panel with collapsible box
+        # Create console panel with static box for labeling
         console_box = wx.StaticBox(self, label="Console Output")
-        console_sizer = wx.StaticBoxSizer(wx.VERTICAL, console_box, "Console Output")
+        console_sizer = wx.StaticBoxSizer(wx.VERTICAL, console_box)
 
         # Create horizontal sizer for controls
         console_controls_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -260,7 +264,7 @@ class MainWindow(wx.Frame):
         self.console_text = wx.TextCtrl(
             console_box,
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_WORDWRAP,
-            size=(-1, 150)  # Fixed height for console
+            size=(-1, 200)  # Increased height for console
         )
 
         # Set console font to monospace
@@ -275,7 +279,10 @@ class MainWindow(wx.Frame):
         console_sizer.Add(console_controls_sizer, 0, wx.EXPAND | wx.ALL, 2)
         console_sizer.Add(self.console_text, 1, wx.EXPAND | wx.ALL, 2)
 
-        # Add console panel to main sizer
+        # Set minimum size for the console box to ensure it takes space
+        console_box.SetMinSize((-1, 250))
+
+        # Add console panel to main sizer with proper expansion
         self.main_sizer.Add(console_box, 0, wx.EXPAND | wx.ALL, 5)
 
     def setup_console_redirection(self):
