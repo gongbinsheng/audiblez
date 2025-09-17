@@ -492,7 +492,7 @@ class MainWindow(wx.Frame):
         self.selected_book_author = meta_creator[0][0] if meta_creator else ''
         self.selected_book = book
 
-        self.document_chapters = find_document_chapters_and_extract_texts(book)
+        self.document_chapters = find_document_chapters_and_extract_texts(book, file_path)
         good_chapters = find_good_chapters(self.document_chapters)
         self.selected_chapter = good_chapters[0]
         for chapter in self.document_chapters:

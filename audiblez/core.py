@@ -91,7 +91,7 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
     if cover_maybe:
         print(f'Found cover image {cover_maybe.file_name} in {cover_maybe.media_type} format')
 
-    document_chapters = find_document_chapters_and_extract_texts(book)
+    document_chapters = find_document_chapters_and_extract_texts(book, file_path)
 
     if not selected_chapters:
         if pick_manually is True:
@@ -222,13 +222,13 @@ def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False
         subprocess.run(['ffplay', '-autoexit', '-nodisp', output_file])
 
 
-def find_document_chapters_and_extract_texts(book):
+def find_document_chapters_and_extract_texts(book, epub_path=None):
     """Returns every chapter that is an ITEM_DOCUMENT and enriches each chapter with extracted_text and extracted_title."""
     document_chapters = []
     for chapter in book.get_items():
         if chapter.get_type() != ebooklib.ITEM_DOCUMENT:
             continue
-        xml = chapter.get_body_content()
+        xml = chapter.get_content()
         soup = BeautifulSoup(xml, features='lxml')
         chapter.extracted_text = ''
         chapter.extracted_title = ''
@@ -239,6 +239,38 @@ def find_document_chapters_and_extract_texts(book):
             title_element = head.find('title')
             if title_element and title_element.text.strip():
                 chapter.extracted_title = title_element.text.strip()
+
+        # If ebooklib didn't give us title, try direct zip extraction
+        if not chapter.extracted_title:
+            try:
+                import zipfile
+                import re
+
+                # Use the provided epub_path if available
+                if epub_path:
+                    with zipfile.ZipFile(epub_path, 'r') as zip_file:
+                        # Find the chapter file in the zip
+                        chapter_path = chapter.get_name()
+                        # Try different possible paths within the epub
+                        possible_paths = [
+                            f"OEBPS/{chapter_path}",
+                            f"OPS/{chapter_path}",
+                            chapter_path,
+                            f"content/{chapter_path}"
+                        ]
+
+                        for path in possible_paths:
+                            try:
+                                raw_content = zip_file.read(path).decode('utf-8')
+                                # Extract title tag with regex
+                                title_match = re.search(r'<title[^>]*>([^<]+)</title>', raw_content, re.IGNORECASE)
+                                if title_match:
+                                    chapter.extracted_title = title_match.group(1).strip()
+                                    break
+                            except KeyError:
+                                continue
+            except Exception:
+                pass  # Fall back to filename if zip extraction fails
 
         # If no title found in header, use filename as fallback
         if not chapter.extracted_title:
