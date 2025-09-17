@@ -11,6 +11,7 @@ import platform
 import subprocess
 import io
 import os
+import sys
 import wx
 from wx.lib.newevent import NewEvent
 from wx.lib.scrolledpanel import ScrolledPanel
@@ -30,6 +31,58 @@ EVENTS = {
 }
 
 border = 5
+
+
+class ConsoleRedirector:
+    """Redirects stdout/stderr to a wx.TextCtrl widget"""
+    def __init__(self, text_ctrl, prefix=""):
+        self.text_ctrl = text_ctrl
+        self.prefix = prefix
+
+    def write(self, text):
+        if text.strip():  # Only show non-empty messages
+            prefixed_text = f"{self.prefix}{text}" if self.prefix else text
+            wx.CallAfter(self._append_text, prefixed_text)
+
+    def _append_text(self, text):
+        if self.text_ctrl:
+            # Scroll to bottom and append text
+            self.text_ctrl.SetInsertionPointEnd()
+            self.text_ctrl.WriteText(text)
+            # Auto-scroll to bottom
+            self.text_ctrl.SetInsertionPointEnd()
+
+    def flush(self):
+        pass  # Required for file-like interface
+
+
+class ConsoleLogger:
+    """Global console logger that can be used from anywhere in the application"""
+    _instance = None
+
+    def __init__(self):
+        self.console_text = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def set_console(self, console_text):
+        self.console_text = console_text
+
+    def log(self, message, prefix=""):
+        """Log a message to the console"""
+        if self.console_text:
+            prefixed_message = f"{prefix}{message}\n" if prefix else f"{message}\n"
+            wx.CallAfter(self._append_to_console, prefixed_message)
+
+    def _append_to_console(self, text):
+        if self.console_text:
+            self.console_text.SetInsertionPointEnd()
+            self.console_text.WriteText(text)
+            self.console_text.SetInsertionPointEnd()
 
 
 class MainWindow(wx.Frame):
@@ -67,6 +120,7 @@ class MainWindow(wx.Frame):
 
         self.create_menu()
         self.create_layout()
+        self.setup_console_redirection()
         self.Centre()
         self.Show(True)
         if Path('../epub/lewis.epub').exists(): self.open_epub('../epub/lewis.epub')
@@ -86,7 +140,7 @@ class MainWindow(wx.Frame):
         self.SetMenuBar(menubar)
 
     def on_core_started(self, event):
-        print('CORE_STARTED')
+        print('✅ Core synthesis engine started')
         self.progress_bar_label.Show()
         self.progress_bar.Show()
         self.progress_bar.SetValue(0)
@@ -96,11 +150,13 @@ class MainWindow(wx.Frame):
         self.synth_panel.Layout()
 
     def on_core_chapter_started(self, event):
-        # print('CORE_CHAPTER_STARTED', event.chapter_index)
+        chapter_name = self.document_chapters[event.chapter_index].short_name if hasattr(self, 'document_chapters') else f"Chapter {event.chapter_index + 1}"
+        print(f"🎯 Processing: {chapter_name}")
         self.set_table_chapter_status(event.chapter_index, "⏳ In Progress")
 
     def on_core_chapter_finished(self, event):
-        # print('CORE_CHAPTER_FINISHED', event.chapter_index)
+        chapter_name = self.document_chapters[event.chapter_index].short_name if hasattr(self, 'document_chapters') else f"Chapter {event.chapter_index + 1}"
+        print(f"✅ Completed: {chapter_name}")
         self.set_table_chapter_status(event.chapter_index, "✅ Done")
         self.start_button.Show()
 
@@ -112,6 +168,9 @@ class MainWindow(wx.Frame):
         self.synth_panel.Layout()
 
     def on_core_finished(self, event):
+        print('🎉 Audiobook generation completed successfully!')
+        print('📁 Opening output folder...')
+        print('=' * 50)
         self.synthesis_in_progress = False
         self.open_folder_with_explorer(self.output_folder_text_ctrl.GetValue())
 
@@ -176,6 +235,75 @@ class MainWindow(wx.Frame):
 
         self.main_sizer.Add(top_panel, 0, wx.ALL | wx.EXPAND, 5)
         self.main_sizer.Add(self.splitter, 1, wx.EXPAND)
+
+        # Add console panel at the bottom
+        self.create_console_panel()
+
+    def create_console_panel(self):
+        """Create the console output panel at the bottom of the window"""
+        # Create console panel with collapsible box
+        console_box = wx.StaticBox(self, label="Console Output")
+        console_sizer = wx.StaticBoxSizer(wx.VERTICAL, console_box, "Console Output")
+
+        # Create horizontal sizer for controls
+        console_controls_sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+        # Add clear button
+        clear_button = wx.Button(console_box, label="Clear")
+        clear_button.Bind(wx.EVT_BUTTON, self.on_clear_console)
+        console_controls_sizer.Add(clear_button, 0, wx.ALL, 2)
+
+        # Add spacer
+        console_controls_sizer.AddStretchSpacer()
+
+        # Create the console text control
+        self.console_text = wx.TextCtrl(
+            console_box,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_WORDWRAP,
+            size=(-1, 150)  # Fixed height for console
+        )
+
+        # Set console font to monospace
+        console_font = wx.Font(10, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        self.console_text.SetFont(console_font)
+
+        # Set background color to dark console-like appearance
+        self.console_text.SetBackgroundColour(wx.Colour(30, 30, 30))
+        self.console_text.SetForegroundColour(wx.Colour(200, 200, 200))
+
+        # Add controls and text area to console sizer
+        console_sizer.Add(console_controls_sizer, 0, wx.EXPAND | wx.ALL, 2)
+        console_sizer.Add(self.console_text, 1, wx.EXPAND | wx.ALL, 2)
+
+        # Add console panel to main sizer
+        self.main_sizer.Add(console_box, 0, wx.EXPAND | wx.ALL, 5)
+
+    def setup_console_redirection(self):
+        """Setup console output redirection to the console panel"""
+        # Store original stdout/stderr for restoration
+        self.original_stdout = sys.stdout
+        self.original_stderr = sys.stderr
+
+        # Create redirectors
+        self.stdout_redirector = ConsoleRedirector(self.console_text)
+        self.stderr_redirector = ConsoleRedirector(self.console_text, "ERROR: ")
+
+        # Redirect stdout and stderr
+        sys.stdout = self.stdout_redirector
+        sys.stderr = self.stderr_redirector
+
+        # Setup global console logger
+        console_logger = ConsoleLogger.get_instance()
+        console_logger.set_console(self.console_text)
+
+        # Add initial welcome message
+        print("🎙️ Audiblez Console - Ready for audiobook generation")
+        print("=" * 50)
+
+    def on_clear_console(self, event):
+        """Clear the console text"""
+        self.console_text.Clear()
+        print("Console cleared")
 
     def create_layout_for_ebook(self, splitter):
         splitter_left = wx.Panel(splitter, -1)
@@ -469,6 +597,12 @@ class MainWindow(wx.Frame):
 
     def on_close(self, event):
         """Handle window close event"""
+        # Restore original stdout/stderr before closing
+        if hasattr(self, 'original_stdout'):
+            sys.stdout = self.original_stdout
+        if hasattr(self, 'original_stderr'):
+            sys.stderr = self.original_stderr
+
         # Save settings before closing
         self._save_current_settings()
 
@@ -632,7 +766,12 @@ class MainWindow(wx.Frame):
                 self.table.SetItem(chapter_index, 0, '✔️')
 
         # self.stop_button.Show()
-        print('Starting Audiobook Synthesis', dict(file_path=file_path, voice=voice, pick_manually=False, speed=speed))
+        print(f"🚀 Starting Audiobook Synthesis")
+        print(f"📖 File: {file_path}")
+        print(f"🎤 Voice: {voice}")
+        print(f"⚡ Speed: {speed}x")
+        print(f"📑 Chapters: {len(selected_chapters)} selected")
+        print("-" * 50)
         self.core_thread = CoreThread(params=dict(
             file_path=file_path, voice=voice, pick_manually=False, speed=speed,
             output_folder=self.output_folder_text_ctrl.GetValue(),
