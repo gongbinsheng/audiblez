@@ -233,56 +233,14 @@ def find_document_chapters_and_extract_texts(book):
         chapter.extracted_text = ''
         chapter.extracted_title = ''
 
-        # Priority 1: Extract chapter title from HTML <title> tag in head section
+        # Extract chapter title from HTML <title> tag in head section
         head = soup.find('head')
         if head:
             title_element = head.find('title')
-            if title_element and title_element.text:
+            if title_element and title_element.text.strip():
                 chapter.extracted_title = title_element.text.strip()
 
-        # Priority 2: Look for meaningful headings in the body if no title tag
-        if not chapter.extracted_title:
-            # Look for h1-h3 headings that might contain the chapter title
-            for heading_tag in ['h1', 'h2', 'h3']:
-                heading = soup.find(heading_tag)
-                if heading and heading.get_text().strip():
-                    heading_text = heading.get_text().strip()
-                    # Skip headings that are just chapter numbers
-                    if not heading_text.lower().startswith('chapter ') or len(heading_text.split()) > 2:
-                        chapter.extracted_title = heading_text
-                        break
-
-        # Priority 3: Combine chapter number with heading if found
-        if not chapter.extracted_title:
-            # Look for chapter number and title separately
-            chapter_num = None
-            chapter_title = None
-
-            # Find chapter number (in elements with "chapter" class or text)
-            for elem in soup.find_all(['p', 'div', 'span']):
-                text = elem.get_text().strip()
-                if text.lower().startswith('chapter ') and len(text.split()) <= 3:
-                    chapter_num = text
-                    break
-
-            # Find meaningful heading for title
-            for heading_tag in ['h1', 'h2', 'h3']:
-                heading = soup.find(heading_tag)
-                if heading:
-                    heading_text = heading.get_text().strip()
-                    if heading_text and not heading_text.lower().startswith('chapter '):
-                        chapter_title = heading_text
-                        break
-
-            # Combine if both found
-            if chapter_num and chapter_title:
-                chapter.extracted_title = f"{chapter_num}: {chapter_title}"
-            elif chapter_title:
-                chapter.extracted_title = chapter_title
-            elif chapter_num:
-                chapter.extracted_title = chapter_num
-
-        # Priority 4: Use filename as final fallback
+        # If no title found in header, use filename as fallback
         if not chapter.extracted_title:
             filename = chapter.get_name()
             # Clean up filename to make a reasonable title
