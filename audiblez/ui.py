@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # A simple wxWidgets UI for audiblez
 
+import warnings
 import torch.cuda
 import torch.backends.mps
 import numpy as np
@@ -21,6 +22,11 @@ from pathlib import Path
 
 from audiblez.voices import voices, flags
 from audiblez.settings import get_settings
+
+# Suppress known warnings from external libraries
+warnings.filterwarnings("ignore", message="It looks like you're using an HTML parser to parse an XML document")
+warnings.filterwarnings("ignore", category=UserWarning, module="ebooklib")
+warnings.filterwarnings("ignore", message="Call to deprecated item.*", category=DeprecationWarning)
 
 EVENTS = {
     'CORE_STARTED': NewEvent(),
@@ -42,6 +48,9 @@ class ConsoleRedirector:
     def write(self, text):
         if text.strip():  # Only show non-empty messages
             prefixed_text = f"{self.prefix}{text}" if self.prefix else text
+            # Ensure text ends with newline for proper line separation
+            if not prefixed_text.endswith('\n'):
+                prefixed_text += '\n'
             wx.CallAfter(self._append_text, prefixed_text)
 
     def _append_text(self, text):
@@ -75,7 +84,10 @@ class ConsoleLogger:
     def log(self, message, prefix=""):
         """Log a message to the console"""
         if self.console_text:
-            prefixed_message = f"{prefix}{message}\n" if prefix else f"{message}\n"
+            prefixed_message = f"{prefix}{message}" if prefix else message
+            # Ensure message ends with newline for proper line separation
+            if not prefixed_message.endswith('\n'):
+                prefixed_message += '\n'
             wx.CallAfter(self._append_to_console, prefixed_message)
 
     def _append_to_console(self, text):
@@ -172,11 +184,14 @@ class MainWindow(wx.Frame):
         print('📁 Opening output folder...')
         print('=' * 50)
         self.synthesis_in_progress = False
+        # Enable the delete temp files button
+        self.delete_temp_button.Enable(True)
         self.open_folder_with_explorer(self.output_folder_text_ctrl.GetValue())
 
     def create_layout(self):
         # Panels layout looks like this:
-        # splitter
+        # top_panel (toolbar)
+        # splitter (main content area)
         #     splitter_left
         #         chapters_panel
         #     splitter_right
@@ -194,6 +209,7 @@ class MainWindow(wx.Frame):
         #                  synth_panel
         #                      start_button
         #                      ...
+        # console_panel (bottom area)
 
         top_panel = wx.Panel(self)
         top_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -227,63 +243,75 @@ class MainWindow(wx.Frame):
         self.main_sizer = wx.BoxSizer(wx.VERTICAL)
         self.SetSizer(self.main_sizer)
 
+        # Create main splitter for content and console
+        self.main_splitter = wx.SplitterWindow(self, style=wx.SP_3D | wx.SP_LIVE_UPDATE)
+        self.main_splitter.SetMinimumPaneSize(100)  # Minimum height for each pane
+
+        # Create content panel for the main application content
+        self.content_panel = wx.Panel(self.main_splitter)
+        content_sizer = wx.BoxSizer(wx.VERTICAL)
+        self.content_panel.SetSizer(content_sizer)
+
         # self.splitter = wx.SplitterWindow(self, -1)
         # self.splitter.SetSashGravity(0.9)
-        self.splitter = wx.Panel(self)
+        self.splitter = wx.Panel(self.content_panel)
         self.splitter_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.splitter.SetSizer(self.splitter_sizer)
 
-        self.main_sizer.Add(top_panel, 0, wx.ALL | wx.EXPAND, 5)
-        self.main_sizer.Add(self.splitter, 1, wx.EXPAND)
+        # Add splitter to content panel
+        content_sizer.Add(self.splitter, 1, wx.EXPAND)
 
-        # Add console panel at the bottom
+        # Create console panel
         self.create_console_panel()
 
-        # Force layout update
-        self.main_sizer.Layout()
-        self.Layout()
+        # Add top panel and main splitter
+        self.main_sizer.Add(top_panel, 0, wx.ALL | wx.EXPAND, 5)
+        self.main_sizer.Add(self.main_splitter, 1, wx.EXPAND)
+
+        # Set up the main splitter with content and console
+        saved_console_height = self.settings.get_console_height()
+        self.main_splitter.SplitHorizontally(self.content_panel, self.console_panel, -saved_console_height)
+
+        # Bind splitter events to save console height
+        self.main_splitter.Bind(wx.EVT_SPLITTER_SASH_POS_CHANGED, self.on_console_resize)
 
     def create_console_panel(self):
         """Create the console output panel at the bottom of the window"""
-        # Create console panel with static box for labeling
-        console_box = wx.StaticBox(self, label="Console Output")
-        console_sizer = wx.StaticBoxSizer(wx.VERTICAL, console_box)
-
-        # Create horizontal sizer for controls
-        console_controls_sizer = wx.BoxSizer(wx.HORIZONTAL)
-
-        # Add clear button
-        clear_button = wx.Button(console_box, label="Clear")
-        clear_button.Bind(wx.EVT_BUTTON, self.on_clear_console)
-        console_controls_sizer.Add(clear_button, 0, wx.ALL, 2)
-
-        # Add spacer
-        console_controls_sizer.AddStretchSpacer()
+        # Create console panel for the splitter
+        self.console_panel = wx.Panel(self.main_splitter)
+        console_sizer = wx.BoxSizer(wx.VERTICAL)
+        self.console_panel.SetSizer(console_sizer)
 
         # Create the console text control
         self.console_text = wx.TextCtrl(
-            console_box,
-            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_WORDWRAP,
-            size=(-1, 200)  # Increased height for console
+            self.console_panel,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_WORDWRAP
         )
 
-        # Set console font to monospace
-        console_font = wx.Font(10, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        # Set console font to larger monospace
+        console_font = wx.Font(12, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
         self.console_text.SetFont(console_font)
 
         # Set background color to dark console-like appearance
         self.console_text.SetBackgroundColour(wx.Colour(30, 30, 30))
         self.console_text.SetForegroundColour(wx.Colour(200, 200, 200))
 
-        # Add controls and text area to console sizer
-        console_sizer.Add(console_controls_sizer, 0, wx.EXPAND | wx.ALL, 2)
+        # Add text area directly to console sizer
         console_sizer.Add(self.console_text, 1, wx.EXPAND | wx.ALL, 2)
 
-        # Set minimum size for the console box to ensure it takes space
-        console_box.SetMinSize((-1, 250))
+        # Set minimum size for the console panel
+        self.console_panel.SetMinSize((-1, 100))
 
-        # Add console panel to main sizer with proper expansion
-        self.main_sizer.Add(console_box, 0, wx.EXPAND | wx.ALL, 5)
+    def on_console_resize(self, event):
+        """Handle console panel resize to save height in settings"""
+        # Get the current sash position (negative value means from bottom)
+        sash_pos = self.main_splitter.GetSashPosition()
+        window_height = self.main_splitter.GetSize().height
+        console_height = window_height - sash_pos
+
+        # Save console height to settings
+        self.settings.set_console_height(console_height)
+        event.Skip()
 
     def setup_console_redirection(self):
         """Setup console output redirection to the console panel"""
@@ -311,6 +339,64 @@ class MainWindow(wx.Frame):
         """Clear the console text"""
         self.console_text.Clear()
         print("Console cleared")
+
+    def on_delete_temp_files(self, event):
+        """Delete temporary WAV files after M4B creation"""
+        if not hasattr(self, 'selected_file_path') or not self.selected_file_path:
+            print("❌ No audiobook generated yet")
+            return
+
+        output_folder = self.output_folder_text_ctrl.GetValue()
+        if not output_folder:
+            print("❌ No output folder specified")
+            return
+
+        try:
+            from pathlib import Path
+            import os
+
+            # Get the base filename without extension
+            filename = Path(self.selected_file_path).name
+            base_name = filename.replace('.epub', '')
+
+            # Find and delete WAV files
+            wav_pattern = f"{base_name}_chapter_*.wav"
+            deleted_count = 0
+
+            for wav_file in Path(output_folder).glob(wav_pattern):
+                try:
+                    wav_file.unlink()
+                    deleted_count += 1
+                    print(f"🗑️ Deleted: {wav_file.name}")
+                except Exception as e:
+                    print(f"❌ Failed to delete {wav_file.name}: {e}")
+
+            # Also try to delete any other temporary files
+            temp_patterns = [
+                f"{base_name}.tmp.wav",
+                f"{base_name}_wav_list.txt",
+                "cover"  # Cover image file
+            ]
+
+            for pattern in temp_patterns:
+                temp_file = Path(output_folder) / pattern
+                if temp_file.exists():
+                    try:
+                        temp_file.unlink()
+                        deleted_count += 1
+                        print(f"🗑️ Deleted: {temp_file.name}")
+                    except Exception as e:
+                        print(f"❌ Failed to delete {temp_file.name}: {e}")
+
+            if deleted_count > 0:
+                print(f"✅ Successfully deleted {deleted_count} temporary file(s)")
+                # Disable the button after successful deletion
+                self.delete_temp_button.Enable(False)
+            else:
+                print("ℹ️ No temporary files found to delete")
+
+        except Exception as e:
+            print(f"❌ Error deleting temporary files: {e}")
 
     def create_layout_for_ebook(self, splitter):
         splitter_left = wx.Panel(splitter, -1)
@@ -522,10 +608,21 @@ class MainWindow(wx.Frame):
         sizer = wx.BoxSizer(wx.VERTICAL)
         panel.SetSizer(sizer)
 
+        # Create horizontal sizer for buttons
+        button_sizer = wx.BoxSizer(wx.HORIZONTAL)
+
         # Add Start button
-        self.start_button = wx.Button(panel, label="🚀 Start Audiobook Synthesis")
+        self.start_button = wx.Button(panel, label="🚀 Start")
         self.start_button.Bind(wx.EVT_BUTTON, self.on_start)
-        sizer.Add(self.start_button, 0, wx.ALL, 5)
+        button_sizer.Add(self.start_button, 0, wx.ALL, 5)
+
+        # Add Delete Temp Files button
+        self.delete_temp_button = wx.Button(panel, label="🗑️ Delete Temp Files")
+        self.delete_temp_button.Bind(wx.EVT_BUTTON, self.on_delete_temp_files)
+        self.delete_temp_button.Enable(False)  # Initially disabled
+        button_sizer.Add(self.delete_temp_button, 0, wx.ALL, 5)
+
+        sizer.Add(button_sizer, 0, wx.ALL, 5)
 
         # Add Stop button
         # self.stop_button = wx.Button(panel, label="⏹️ Stop Synthesis")
@@ -579,22 +676,32 @@ class MainWindow(wx.Frame):
             size = self.GetSize()
             self.settings.set_window_size(size.width, size.height)
 
+            # Save console height
+            if hasattr(self, 'main_splitter'):
+                sash_pos = self.main_splitter.GetSashPosition()
+                window_height = self.main_splitter.GetSize().height
+                console_height = window_height - sash_pos
+                self.settings.set_console_height(console_height)
+
             # Save engine selection
-            if self.cpu_radio.GetValue():
+            if hasattr(self, 'cpu_radio') and self.cpu_radio.GetValue():
                 self.settings.set_engine('cpu')
-            elif self.cuda_radio.GetValue():
+            elif hasattr(self, 'cuda_radio') and self.cuda_radio.GetValue():
                 self.settings.set_engine('cuda')
-            elif self.apple_radio.GetValue():
+            elif hasattr(self, 'apple_radio') and self.apple_radio.GetValue():
                 self.settings.set_engine('apple')
 
             # Save voice selection
-            self.settings.set_voice(self.selected_voice)
+            if hasattr(self, 'selected_voice'):
+                self.settings.set_voice(self.selected_voice)
 
             # Save speed
-            self.settings.set_speed(float(self.selected_speed))
+            if hasattr(self, 'selected_speed'):
+                self.settings.set_speed(float(self.selected_speed))
 
             # Save output folder
-            self.settings.set_output_folder(self.output_folder_text_ctrl.GetValue())
+            if hasattr(self, 'output_folder_text_ctrl'):
+                self.settings.set_output_folder(self.output_folder_text_ctrl.GetValue())
 
             # Write to file
             self.settings.save_settings()
@@ -650,7 +757,7 @@ class MainWindow(wx.Frame):
         cover = find_cover(book)
         if cover is not None:
             pil_image = Image.open(io.BytesIO(cover.content))
-            wx_img = wx.EmptyImage(pil_image.size[0], pil_image.size[1])
+            wx_img = wx.Image(pil_image.size[0], pil_image.size[1])
             wx_img.SetData(pil_image.convert("RGB").tobytes())
             cover_h = 200
             cover_w = int(cover_h * pil_image.size[0] / pil_image.size[1])
@@ -732,7 +839,7 @@ class MainWindow(wx.Frame):
         def generate_preview():
             import audiblez.core as core
             from kokoro import KPipeline
-            pipeline = KPipeline(lang_code=lang_code)
+            pipeline = KPipeline(lang_code=lang_code, repo_id='hexgrad/Kokoro-82M')
             core.load_spacy()
             text = self.selected_chapter.extracted_text[:300]
             if len(text) == 0: return
@@ -744,8 +851,11 @@ class MainWindow(wx.Frame):
             final_audio = np.concatenate(audio_segments)
             tmp_preview_wav_file = NamedTemporaryFile(suffix='.wav', delete=False)
             soundfile.write(tmp_preview_wav_file, final_audio, core.sample_rate)
+            # Import get_subprocess_env from core
+            from audiblez.core import get_subprocess_env
+            env = get_subprocess_env()
             cmd = ['ffplay', '-autoexit', '-nodisp', tmp_preview_wav_file.name]
-            subprocess.run(cmd)
+            subprocess.run(cmd, env=env)
             button.SetLabel("🔊 Preview")
             button.Enable()
 
@@ -790,7 +900,6 @@ class MainWindow(wx.Frame):
             if dialog.ShowModal() == wx.ID_CANCEL:
                 return
             file_path = dialog.GetPath()
-            print(f"Selected file: {file_path}")
             if not file_path:
                 print('No filepath?')
                 return
@@ -807,12 +916,14 @@ class MainWindow(wx.Frame):
 
     def open_folder_with_explorer(self, folder_path):
         try:
+            from audiblez.core import get_subprocess_env
+            env = get_subprocess_env()
             if platform.system() == 'Windows':
-                subprocess.Popen(['explorer', folder_path])
+                subprocess.Popen(['explorer', folder_path], env=env)
             elif platform.system() == 'Linux':
-                subprocess.Popen(['xdg-open', folder_path])
+                subprocess.Popen(['xdg-open', folder_path], env=env)
             elif platform.system() == 'Darwin':
-                subprocess.Popen(['open', folder_path])
+                subprocess.Popen(['open', folder_path], env=env)
         except Exception as e:
             print(e)
 
@@ -842,7 +953,6 @@ def main():
     frame.Show(True)
     frame.Layout()
     app.SetTopWindow(frame)
-    print('Done.')
     app.MainLoop()
 
 

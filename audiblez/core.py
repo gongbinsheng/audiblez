@@ -5,6 +5,7 @@
 # by Claudio Santini 2025 - https://claudio.uk
 import os
 import traceback
+import warnings
 from glob import glob
 
 import torch.cuda
@@ -28,7 +29,36 @@ from kokoro import KPipeline
 from ebooklib import epub
 from pick import pick
 
+# Suppress known warnings from external libraries
+warnings.filterwarnings("ignore", category=UserWarning, module="ebooklib")
+warnings.filterwarnings("ignore", category=FutureWarning, module="ebooklib")
+warnings.filterwarnings("ignore", message="It looks like you're using an HTML parser to parse an XML document")
+warnings.filterwarnings("ignore", category=UserWarning, message=".*ignore_ncx.*")
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch.nn.utils.weight_norm")
+warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules.rnn")
+
 sample_rate = 24000
+
+
+def get_subprocess_env():
+    """Get environment with proper PATH for subprocess calls, especially on macOS"""
+    env = os.environ.copy()
+
+    # Add common Homebrew paths for macOS
+    if platform.system() == 'Darwin':
+        homebrew_paths = [
+            '/opt/homebrew/bin',  # Apple Silicon Homebrew
+            '/usr/local/bin',     # Intel Homebrew
+            '/opt/homebrew/sbin',
+            '/usr/local/sbin'
+        ]
+
+        current_path = env.get('PATH', '')
+        for path in homebrew_paths:
+            if path not in current_path:
+                env['PATH'] = f"{path}:{env['PATH']}"
+
+    return env
 
 
 def load_spacy():
@@ -46,7 +76,8 @@ def set_espeak_library():
         elif platform.system() == 'Darwin':
             from subprocess import check_output
             try:
-                cellar = Path(check_output(["brew", "--cellar"], text=True).strip())
+                env = get_subprocess_env()
+                cellar = Path(check_output(["brew", "--cellar"], text=True, env=env).strip())
                 pattern = cellar / "espeak-ng" / "*" / "lib" / "*.dylib"
                 if not (library := next(iter(glob(str(pattern))), None)):
                     raise RuntimeError("No espeak-ng library found; please set the path manually")
@@ -101,9 +132,18 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
     print_selected_chapters(document_chapters, selected_chapters)
     texts = [c.extracted_text for c in selected_chapters]
 
-    has_ffmpeg = shutil.which('ffmpeg') is not None
+    # Check for ffmpeg using the same environment that subprocess calls will use
+    env = get_subprocess_env()
+    has_ffmpeg = shutil.which('ffmpeg', path=env.get('PATH')) is not None
     if not has_ffmpeg:
         print('\033[91m' + 'ffmpeg not found. Please install ffmpeg to create mp3 and m4b audiobook files.' + '\033[0m')
+        print(f"PATH being searched: {env.get('PATH')}")
+        # Try to find ffmpeg in common locations
+        common_locations = ['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg']
+        for location in common_locations:
+            if os.path.exists(location):
+                print(f"Found ffmpeg at: {location}")
+                break
 
     stats = SimpleNamespace(
         total_chars=sum(map(len, texts)),
@@ -115,7 +155,7 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
     eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
     print(f'Estimated time remaining (assuming {stats.chars_per_sec} chars/sec): {eta}')
     set_espeak_library()
-    pipeline = KPipeline(lang_code=voice[0])  # a for american or b for british etc.
+    pipeline = KPipeline(lang_code=voice[0], repo_id='hexgrad/Kokoro-82M')  # a for american or b for british etc.
 
     chapter_wav_files = []
     for i, chapter in enumerate(selected_chapters, start=1):
@@ -155,7 +195,7 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
             chapter_wav_files.remove(chapter_wav_path)
 
     if has_ffmpeg:
-        create_index_file(title, creator, selected_chapters, chapter_wav_files, output_folder)
+        chapters_file = create_index_file(title, creator, selected_chapters, chapter_wav_files, output_folder)
         create_m4b(chapter_wav_files, filename, cover_image, output_folder)
         if post_event: post_event('CORE_FINISHED')
 
@@ -213,13 +253,14 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
 
 def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False):
     lang_code = voice[:1]
-    pipeline = KPipeline(lang_code=lang_code)
+    pipeline = KPipeline(lang_code=lang_code, repo_id='hexgrad/Kokoro-82M')
     load_spacy()
     audio_segments = gen_audio_segments(pipeline, text, voice=voice, speed=speed);
     final_audio = np.concatenate(audio_segments)
     soundfile.write(output_file, final_audio, sample_rate)
     if play:
-        subprocess.run(['ffplay', '-autoexit', '-nodisp', output_file])
+        env = get_subprocess_env()
+        subprocess.run(['ffplay', '-autoexit', '-nodisp', output_file], env=env)
 
 
 def find_document_chapters_and_extract_texts(book, epub_path=None):
@@ -310,7 +351,6 @@ def chapter_beginning_one_liner(c, chars=20):
 def find_good_chapters(document_chapters):
     chapters = [c for c in document_chapters if c.get_type() == ebooklib.ITEM_DOCUMENT and is_chapter(c)]
     if len(chapters) == 0:
-        print('Not easy to recognize the chapters, defaulting to all non-empty documents.')
         chapters = [c for c in document_chapters if c.get_type() == ebooklib.ITEM_DOCUMENT and len(c.extracted_text) > 10]
     return chapters
 
@@ -346,7 +386,8 @@ def concat_wavs_with_ffmpeg(chapter_files, output_folder, filename):
         for wav_file in chapter_files:
             f.write(f"file '{wav_file}'\n")
     concat_file_path = Path(output_folder) / filename.replace('.epub', '.tmp.wav')
-    result = subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', wav_list_txt, '-c', 'copy', concat_file_path])
+    env = get_subprocess_env()
+    result = subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', wav_list_txt, '-c', 'copy', concat_file_path], env=env)
     if result.returncode != 0:
         print(f"Concatenation failed. WAV list preserved at: {wav_list_txt}")
         raise RuntimeError(f"Failed to concatenate WAV files. FFmpeg returned code {result.returncode}")
@@ -355,12 +396,16 @@ def concat_wavs_with_ffmpeg(chapter_files, output_folder, filename):
 
 
 def create_m4b(chapter_files, filename, cover_image, output_folder):
+    print("🔄 Concatenating WAV files...")
     concat_file_path = concat_wavs_with_ffmpeg(chapter_files, output_folder, filename)
+    print(f"✅ Concatenated WAV file created: {concat_file_path}")
+
     final_filename = Path(output_folder) / filename.replace('.epub', '.m4b')
     chapters_txt_path = Path(output_folder) / "chapters.txt"
-    print('Creating M4B file...')
+    print(f'🎧 Creating M4B file: {final_filename}')
 
     if cover_image:
+        print("🖼️ Adding cover image...")
         cover_file_path = Path(output_folder) / 'cover'
         with open(cover_file_path, 'wb') as f:
             f.write(cover_image)
@@ -370,13 +415,15 @@ def create_m4b(chapter_files, filename, cover_image, output_folder):
             '-disposition:v', 'attached_pic',  # Ensure cover is embedded
             '-c:v', 'copy',  # Keep cover unchanged
         ]
+        print(f"   Cover saved to: {cover_file_path}")
     else:
+        print("📝 No cover image provided")
         cover_image_args = []
 
-    proc = subprocess.run([
+    ffmpeg_cmd = [
         'ffmpeg',
         '-y',  # Overwrite output
-        
+
         '-i', f'{concat_file_path}',  # Input audio
         '-i', f'{chapters_txt_path}',  # Input chapters
         *cover_image_args,  # Cover image (if provided)
@@ -389,21 +436,28 @@ def create_m4b(chapter_files, filename, cover_image, output_folder):
 
         '-f', 'mp4',  # Output as M4B
         f'{final_filename}'  # Output file
-    ])
+    ]
+
+    print("⚙️ Running FFmpeg command...")
+    print("Command:", ' '.join([str(arg) for arg in ffmpeg_cmd]))
+
+    env = get_subprocess_env()
+    proc = subprocess.run(ffmpeg_cmd, env=env)
 
     if proc.returncode == 0:
         Path(concat_file_path).unlink()
-        print(f'{final_filename} created. Enjoy your audiobook.')
-        print('Feel free to delete the intermediary .wav chapter files, the .m4b is all you need.')
+        print(f'🎉 {final_filename} created successfully!')
+        print('💡 Feel free to delete the intermediary .wav chapter files, the .m4b is all you need.')
     else:
-        print(f'Error creating M4B file. FFmpeg returned code {proc.returncode}')
-        print(f'Concatenated audio file preserved at: {concat_file_path}')
+        print(f'❌ Error creating M4B file. FFmpeg returned code {proc.returncode}')
+        print(f'📁 Concatenated audio file preserved at: {concat_file_path}')
         raise RuntimeError(f"Failed to create M4B file. FFmpeg returned code {proc.returncode}")
 
 
 def probe_duration(file_name):
     args = ['ffprobe', '-i', file_name, '-show_entries', 'format=duration', '-v', 'quiet', '-of', 'default=noprint_wrappers=1:nokey=1']
-    proc = subprocess.run(args, capture_output=True, text=True, check=True)
+    env = get_subprocess_env()
+    proc = subprocess.run(args, capture_output=True, text=True, check=True, env=env)
     return float(proc.stdout.strip())
 
 
@@ -419,18 +473,26 @@ def create_index_file(title, creator, selected_chapters, chapter_wav_files, outp
             sanitized = sanitized[:97] + "..."
         return sanitized
 
-    with open(Path(output_folder) / "chapters.txt", "w", encoding="utf-8") as f:
+    print("📝 Creating chapters.txt file...")
+    chapters_file = Path(output_folder) / "chapters.txt"
+
+    with open(chapters_file, "w", encoding="utf-8") as f:
         f.write(f";FFMETADATA1\ntitle={title}\nartist={creator}\n\n")
         start = 0
         for i, (chapter, wav_file) in enumerate(zip(selected_chapters, chapter_wav_files)):
+            print(f"📄 Processing chapter {i+1}: {wav_file}")
             duration = probe_duration(wav_file)
             end = start + (int)(duration * 1000)
 
             # Use extracted title, with fallback to generic chapter number
-            chapter_title = sanitize_title(chapter.extracted_title) if hasattr(chapter, 'extracted_title') and chapter.extracted_title else f"Chapter {i}"
+            chapter_title = sanitize_title(chapter.extracted_title) if hasattr(chapter, 'extracted_title') and chapter.extracted_title else f"Chapter {i+1}"
+            print(f"   Title: '{chapter_title}', Duration: {duration:.2f}s")
 
             f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}\ntitle={chapter_title}\n\n")
             start = end
+
+    print(f"✅ Chapters file created: {chapters_file}")
+    return chapters_file
 
 
 def unmark_element(element, stream=None):

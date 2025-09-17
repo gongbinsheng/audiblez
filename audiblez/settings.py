@@ -20,6 +20,9 @@ class Settings:
                 'width': 800,
                 'height': 600
             },
+            'console': {
+                'height': 200
+            },
             'engine': self._get_default_engine(),
             'voice': None,  # Will be set to first available voice
             'speed': 1.0,
@@ -136,6 +139,11 @@ class Settings:
         """Get output folder path"""
         return self.settings.get('output_folder', os.path.abspath('.'))
 
+    def get_console_height(self) -> int:
+        """Get console panel height"""
+        console = self.settings.get('console', {})
+        return console.get('height', 200)
+
     # Setter methods
     def set_window_size(self, width: int, height: int) -> None:
         """Set window size"""
@@ -164,6 +172,12 @@ class Settings:
     def set_output_folder(self, folder: str) -> None:
         """Set output folder path"""
         self.settings['output_folder'] = folder
+
+    def set_console_height(self, height: int) -> None:
+        """Set console panel height"""
+        if 'console' not in self.settings:
+            self.settings['console'] = {}
+        self.settings['console']['height'] = height
 
 
 # Global settings instance
