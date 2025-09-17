@@ -496,7 +496,11 @@ class MainWindow(wx.Frame):
         good_chapters = find_good_chapters(self.document_chapters)
         self.selected_chapter = good_chapters[0]
         for chapter in self.document_chapters:
-            chapter.short_name = chapter.get_name().replace('.xhtml', '').replace('xhtml/', '').replace('.html', '').replace('Text/', '')
+            # Use extracted chapter title if available, otherwise fall back to cleaned filename
+            if hasattr(chapter, 'extracted_title') and chapter.extracted_title:
+                chapter.short_name = chapter.extracted_title
+            else:
+                chapter.short_name = chapter.get_name().replace('.xhtml', '').replace('xhtml/', '').replace('.html', '').replace('Text/', '')
             chapter.is_selected = chapter in good_chapters
 
         self.create_layout_for_ebook(self.splitter)
